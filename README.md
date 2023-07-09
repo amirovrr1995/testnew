@@ -32,6 +32,9 @@ curl https://raw.githubusercontent.com/alperen-selcuk/kind-install/main/kind.sh 
 ![image](https://github.com/amirovrr1995/testnew/assets/73028147/fc16343c-905d-46f1-9d0e-7986af4dc29f)
 ![image](https://github.com/amirovrr1995/testnew/assets/73028147/d453f25a-a780-4fc2-8055-3b0c77722de1)
 ![image](https://github.com/amirovrr1995/testnew/assets/73028147/fb62aa5b-f3db-46ef-b8d7-e2576359cc05)
+
+![image](https://github.com/amirovrr1995/testnew/assets/73028147/202eb2c6-df2b-497b-a20b-cbd85d0a6270)
+
 #my docker hub 
 ![image](https://github.com/amirovrr1995/testnew/assets/73028147/36cb2a7d-fd85-4584-a03a-a2172c4c3404)
 ![image](https://github.com/amirovrr1995/testnew/assets/73028147/4d510cbe-5636-4d79-a582-a3ab71d5fb63)
