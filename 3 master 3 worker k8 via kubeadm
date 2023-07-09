@@ -1,0 +1,767 @@
+
+#Kubernetes cluster with kubeadm 
+Prerequisites
+
+For this lab, we will use a standard Ubuntu 20.04 installation as a base image for the eight machines needed. The machines will all be configured on the same network, 192.168.105.0/24, and this network needs to have access to the Internet.
+
+The first machine needInstall and configure a multi-master Kubernetes cluster with kubeadmed is the machine on which the HAProxy load balancer will be installed. We will assign the IP 192.168.105.110 and 192.168.105.111 to this machine.
+
+We also need three Kubernetes master nodes. These machines will have the IPs 192.168.105.112, 192.168.105.113, and 192.168.105.114.
+
+Finally, we will also have four Kubernetes worker nodes with the IPs 192.168.105.115, 192.168.105.116, 192.168.105.117 and 192.168.105.118.
+
+We also need an IP range for the pods. This range will be 10.30.0.0/16, but it is only internal to Kubernetes.
+
+I will use my Linux desktop as a client machine to generate all the necessary certificates, but also to manage the Kubernetes cluster. If you don’t have a Linux desktop, you can use the HAProxy machine to do the same thing.
+
+
+```
+cat <<EOF>> /etc/hosts
+192.168.105.110  lb01
+192.168.105.111  lb02
+192.168.105.119  lb
+192.168.105.112  master01
+192.168.105.11192.168.105.114  master033  master02
+192.168.105.115  worker01
+192.168.105.116  worker02
+192.168.105.117  worker03
+192.168.105.118  worker04
+EOF
+```
+
+Installing the client tools
+
+We will need two tools on the client machine: the Cloud Flare SSL tool to generate the different certificates, and the Kubernetes client, kubectl, to manage the Kubernetes cluster.
+
+
+Installing cfssl
+
+1- Download the binaries.
+
+```
+$ wget https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
+$ wget https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+
+```
+2- Add the execution permission to the binaries.
+
+$ chmod +x cfssl*
+
+3- Move the binaries to /usr/local/bin.
+
+```
+$ sudo mv cfssl_linux-amd64 /usr/local/bin/cfssl
+$ sudo mv cfssljson_linux-amd64 /usr/local/bin/cfssljson
+
+```
+4- Verify the installation.
+
+$ cfssl version
+
+
+
+5-Download the latest kubectl release with the command:
+```
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+```
+
+6-Download the kubectl checksum file:
+```
+curl -LO "https://dl.k8s.io/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256"
+```
+
+```
+echo "$(cat kubectl.sha256) kubectl" | sha256sum --check
+```
+
+7-Install kubectl
+```
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+kubectl version --client
+```
+
+
+
+
+Installing the HAProxy load balancer
+
+As we will deploy three Kubernetes master nodes, we need to deploy an HAPRoxy load balancer in front of them to distribute the traffic.
+
+1- SSH to the 192.168.105.110 Ubuntu machine.
+
+2- Update the machine.
+
+```
+$ sudo apt-get update
+$ sudo apt-get upgrade
+
+```
+3- Install HAProxy.
+
+```
+$ sudo apt-get install keepalived haproxy psmisc -y
+
+```
+4- Configure HAProxy to load balance the traffic between the three Kubernetes master nodes.
+
+```
+$ sudo vim /etc/haproxy/haproxy.cfg
+global
+...
+default
+...
+frontend kubernetes
+bind *:6443
+option tcplog
+mode tcp
+default_backend kubernetes-master-nodes
+
+
+backend kubernetes-master-nodes
+mode tcp
+balance roundrobin
+option tcp-check
+server k8s-master-0 192.168.105.112:6443 check fall 3 rise 2
+server k8s-master-1 192.168.105.113:6443 check fall 3 rise 2
+server k8s-master-2 192.168.105.114:6443 check fall 3 rise 2
+
+```
+5- Restart HAProxy.
+
+```
+$ sudo systemctl restart haproxy
+
+```
+
+
+
+
+Keepalived Configuration
+
+Keepalived must be installed on both machines while the configuration of them is slightly different.
+
+Run the following command to create configure Keepalived.
+```
+vi /etc/keepalived/keepalived.conf
+```
+
+
+
+
+Here is an example configuration (lb1) for your reference:
+
+```
+global_defs {
+  notification_email {
+  }
+  router_id LVS_DEVEL
+  vrrp_skip_check_adv_addr
+  vrrp_garp_interval 0
+  vrrp_gna_interval 0
+}
+
+vrrp_script chk_haproxy {
+  script "killall -0 haproxy"
+  interval 2
+  weight 2
+}
+
+vrrp_instance haproxy-vip {
+  state BACKUP
+  priority 100
+  interface ens160
+  virtual_router_id 60
+  advert_int 1
+  authentication {
+    auth_type PASS
+    auth_pass 1111
+  }
+  unicast_src_ip 192.168.105.110
+  unicast_peer {
+    192.168.105.111
+  }
+
+  virtual_ipaddress {
+    192.168.105.119/24
+  }
+
+  track_script {
+    chk_haproxy
+  }
+}
+```
+
+
+
+
+Note:
+
+- For the interface field, you must provide your own network card information. You can run ifconfig on your machine to get the value.
+- The IP address provided for unicast_src_ip is the IP address of your current machine. For other machines where HAproxy and Keepalived are also installed for load balancing, their IP address must be provided for the field unicast_peer.
+
+
+
+
+Save the file and run the following command to restart Keepalived.
+
+```
+systemctl restart keepalived
+```
+
+
+
+
+Make it persist through reboots:
+
+```
+systemctl enable keepalived
+```
+
+
+
+Make sure you configure Keepalived on the other machine (lb2) as well.
+
+
+
+
+
+Verify High Availability
+
+On the machine lb1, run the following command:
+```
+ip a s
+```
+
+
+
+As you can see above, the virtual IP address is successfully added. Simulate a failure on this node:
+
+```
+systemctl stop haproxy
+```
+
+Check the floating IP address again and you can see it disappear on lb1.
+
+
+
+Theoretically, the virtual IP will be failed over to the other machine (lb2) if the configuration is successful. On lb2, run the following command and here is the expected output:
+
+
+
+As you can see above, high availability is successfully configured.
+
+---
+
+Generating the TLS certificates
+
+These steps can be done on your Linux desktop if you have one or on the HAProxy machine depending on where you installed the cfssl tool.
+
+
+Creating a certificate authority
+
+1- Create the certificate authority configuration file.
+
+```
+$ vim ca-config.json
+{
+  "signing": {
+    "default": {
+      "expiry": "8760h"
+    },
+    "profiles": {
+      "kubernetes": {
+        "usages": ["signing", "key encipherment", "server auth", "client auth"],
+        "expiry": "8760h"
+      }
+    }
+  }
+}
+
+```
+2- Create the certificate authority signing request configuration file.
+
+```
+$ vim ca-csr.json
+{
+  "CN": "Kubernetes",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+  {
+    "C": "IE",
+    "L": "Cork",
+    "O": "Kubernetes",
+    "OU": "CA",
+    "ST": "Cork Co."
+  }
+ ]
+}
+
+```
+3- Generate the certificate authority certificate and private key.
+
+```
+$ cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+
+```
+4- Verify that the ca-key.pem and the ca.pem were generated.
+
+```
+$ ls -la
+
+```
+
+
+
+
+Creating the certificate for the Etcd cluster
+
+1- Create the certificate signing request configuration file.
+
+```
+$ vim kubernetes-csr.json
+{
+  "CN": "kubernetes",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+  {
+    "C": "IE",
+    "L": "Cork",
+    "O": "Kubernetes",
+    "OU": "Kubernetes",
+    "ST": "Cork Co."
+  }
+ ]
+}
+
+```
+2- Generate the certificate and private key.
+
+```
+cfssl gencert \
+-ca=ca.pem \
+-ca-key=ca-key.pem \
+-config=ca-config.json \
+-hostname=192.168.105.112,192.168.105.113,192.168.105.114,192.168.105.110,192.168.105.111,192.168.105.119,127.0.0.1,kubernetes.default \
+-profile=kubernetes kubernetes-csr.json | \
+cfssljson -bare kubernetes
+
+```
+3- Verify that the kubernetes-key.pem and the kubernetes.pem file were generated.
+
+```
+ls -la
+
+```
+4- Copy the certificate to each nodes.
+
+```
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.112:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.113:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.114:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.115:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.116:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.117:~
+scp ca.pem kubernetes.pem kubernetes-key.pem samad@192.168.105.118:~
+```
+
+
+
+
+
+Preparing the nodes for kubeadm
+
+
+Preparing the 192.168.105.112/113/114/115/116/117/118 machine
+
+Performing below steps on all systems
+
+
+Installing containerd
+
+
+# Add Docker repo
+```
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+```
+
+# Install containerd
+```
+sudo apt update
+sudo apt install -y containerd.io
+```
+
+# Configure containerd and start service
+```
+sudo su -
+mkdir -p /etc/containerd
+containerd config default>/etc/containerd/config.toml
+```
+
+# restart containerd 
+```
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+systemctl status  containerd
+```
+
+
+
+Installing kubeadm, kublet, and kubectl
+
+
+Update the apt package index and install packages needed to use the Kubernetes apt repository:
+```
+sudo apt-get update
+sudo apt-get install -y apt-transport-https ca-certificates curl
+```
+
+Download the Google Cloud public signing key:
+```
+sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+```
+
+Add the Kubernetes apt repository:
+```
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
+
+Update apt package index, install kubelet, kubeadm and kubectl, and pin their version:
+```
+sudo apt-get update
+sudo apt-get install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+```
+
+Disable the swap
+```
+swapoff -a
+sed -i '/ swap / s/^/#/' /etc/fstab
+```
+
+```
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+```
+
+```
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+
+```
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+```
+
+```
+sudo sysctl --system
+```
+
+
+
+
+Installing and configuring Etcd
+
+
+Installing and configuring Etcd on the 192.168.105.112/113/114 machine (All 3 master)
+
+1- SSH to the 192.168.105.112 machine.2- Create a configuration directory for Etcd.
+
+```
+mkdir /etc/etcd /var/lib/etcd
+
+```
+3- Move the certificates to the configuration directory.
+
+```
+mv /home/samad/ca.pem /home/samad/kubernetes.pem /home/samad/kubernetes-key.pem /etc/etcd
+
+```
+4- Download the etcd binaries.
+
+```
+wget https://github.com/etcd-io/etcd/releases/download/v3.5.5/etcd-v3.5.5-linux-amd64.tar.gz
+
+```
+5- Extract the etcd archive.
+
+```
+tar xvzf etcd-v3.5.5-linux-amd64.tar.gz
+
+```
+6- Move the etcd binaries to /usr/local/bin.
+
+```
+mv etcd-v3.5.5-linux-amd64/etcd* /usr/local/bin/
+
+```
+7- Create an etcd systemd unit file.
+
+```
+vim /etc/systemd/system/etcd.service
+
+[Unit]
+Description=etcd
+Documentation=https://github.com/coreos
+
+
+[Service]
+ExecStart=/usr/local/bin/etcd \
+  --name 192.168.105.114 \
+  --cert-file=/etc/etcd/kubernetes.pem \
+  --key-file=/etc/etcd/kubernetes-key.pem \
+  --peer-cert-file=/etc/etcd/kubernetes.pem \
+  --peer-key-file=/etc/etcd/kubernetes-key.pem \
+  --trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-trusted-ca-file=/etc/etcd/ca.pem \
+  --peer-client-cert-auth \
+  --client-cert-auth \
+  --initial-advertise-peer-urls https://192.168.105.114:2380 \
+  --listen-peer-urls https://192.168.105.114:2380 \
+  --listen-client-urls https://192.168.105.114:2379,http://127.0.0.1:2379 \
+  --advertise-client-urls https://192.168.105.114:2379 \
+  --initial-cluster-token etcd-cluster-0 \
+  --initial-cluster 192.168.105.112=https://192.168.105.112:2380,192.168.105.113=https://192.168.105.113:2380,192.168.105.114=https://192.168.105.114:2380 \
+  --initial-cluster-state new \
+  --data-dir=/var/lib/etcd
+Restart=on-failure
+RestartSec=5
+
+
+
+[Install]
+WantedBy=multi-user.target
+
+```
+8- Reload the daemon configuration.
+
+```
+systemctl daemon-reload
+
+```
+9- Enable etcd to start at boot time.
+
+```
+systemctl enable etcd
+
+```
+10- Start etcd.
+
+```
+sudo systemctl start etcd
+
+```
+11- Verify that the cluster is up and running.
+
+```
+ETCDCTL_API=3 etcdctl member list
+
+```
+Perform all the steps on other Master (113 and 114) by replacing IP
+
+
+
+
+Initializing the master nodes
+
+
+Initializing the Master node 192.168.105.112
+
+1- SSH to the 192.168.105.112 machine.2- Create the configuration file for kubeadm.
+
+```
+vim config.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta3 
+kind: ClusterConfiguration 
+etcd: 
+    external: 
+      endpoints: 
+      - https://192.168.105.112:2379 
+      - https://192.168.105.113:2379 
+      - https://192.168.105.114:2379 
+      caFile: /etc/etcd/ca.pem 
+      certFile: /etc/etcd/kubernetes.pem 
+      keyFile: /etc/etcd/kubernetes-key.pem 
+networking: 
+  podSubnet: "10.30.0.0/16" 
+kubernetesVersion: stable 
+controlPlaneEndpoint: "192.168.105.119:6443" 
+apiServer: 
+  extraArgs: 
+    apiserver-count: "3" 
+  certSANs: 
+  - 192.168.105.119
+```
+3- Initialize the machine as a master node.
+
+```
+kubeadm init --config=config.yaml
+
+```
+4- Copy the certificates to the two other masters.
+
+```
+scp -r /etc/kubernetes/pki samad@192.168.105.113:~
+scp -r /etc/kubernetes/pki samad@192.168.105.114:~
+
+```
+
+
+
+
+Initializing the 2nd master node 192.168.105.113
+
+1- SSH to the 192.168.105.113 machine.2- Remove the apiserver.crt and apiserver.key.
+
+```
+rm /home/samad/pki/apiserver.*
+
+```
+3- Move the certificates to the /etc/kubernetes directory.
+
+```
+mv /home/samad/pki /etc/kubernetes/
+
+```
+4 - Create the configuration file for kubeadm.
+
+```
+vim config.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta3  
+kind: ClusterConfiguration  
+etcd:  
+    external:  
+      endpoints:  
+      - https://192.168.105.112:2379  
+      - https://192.168.105.113:2379  
+      - https://192.168.105.114:2379  
+      caFile: /etc/etcd/ca.pem  
+      certFile: /etc/etcd/kubernetes.pem  
+      keyFile: /etc/etcd/kubernetes-key.pem  
+networking:  
+  podSubnet: "10.30.0.0/16"  
+kubernetesVersion: stable  
+controlPlaneEndpoint: "192.168.105.119:6443"  
+apiServer:  
+  extraArgs:  
+    apiserver-count: "3"  
+  certSANs:  
+  - 192.168.105.119
+```
+5- Initialize the machine as a master node.
+
+```
+kubeadm init --config=config.yaml
+
+```
+#### Initializing the 3rd master node 192.168.105.114 1- SSH to the 192.168.105.114 machine.2- Remove the apiserver.crt and apiserver.key.
+
+```
+rm /home/samad/pki/apiserver.*
+
+```
+3- Move the certificates to the /etc/kubernetes directory.
+
+```
+mv /home/samad/pki /etc/kubernetes/
+
+```
+4 - Create the configuration file for kubeadm.
+
+```
+vim config.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta3  
+kind: ClusterConfiguration  
+etcd:  
+    external:  
+      endpoints:  
+      - https://192.168.105.112:2379  
+      - https://192.168.105.113:2379  
+      - https://192.168.105.114:2379  
+      caFile: /etc/etcd/ca.pem  
+      certFile: /etc/etcd/kubernetes.pem  
+      keyFile: /etc/etcd/kubernetes-key.pem  
+networking:  
+  podSubnet: "10.30.0.0/16"  
+kubernetesVersion: stable  
+controlPlaneEndpoint: "192.168.105.119:6443"  
+apiServer:  
+  extraArgs:  
+    apiserver-count: "3"  
+  certSANs:  
+  - 192.168.105.119
+```
+5- Initialize the machine as a master node.
+
+```
+ kubeadm init --config=config.yaml
+```
+6- Copy the “kubeadm join” command line printed as the result of the previous command.
+
+### Initializing the worker nodes #### Initializing the worker node 192.168.105.115/116/117 1- SSH to the 192.168.105.115 machine.2- Execute the “kubeadm join” command that you copied from the last step of the initialization of the masters.
+
+```
+kubeadm join 10.10.40.93:6443 --token [your_token] --discovery-token-ca-cert-hash sha256:[your_token_ca_cert_hash]
+
+```
+Run same command on worker node 101 and 102
+
+#### Verifying that the workers joined the cluster 1- SSH to one of the master node.2- Get the list of the nodes.
+
+```
+kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
+```
+
+
+
+
+Configuring kubectl on the client machine
+
+1- SSH to one of the master node. 10.10.10.90 2- Add permissions to the admin.conf file.
+
+```
+cp /etc/kubernetes/admin.conf /root/.kube/config
+```
+
+2- check that you can access the Kubernetes API from the client machine.
+
+```
+$ kubectl get nodes
+```
+
+
+
+
+Deploying the overlay network
+
+We are going to use Calico as the overlay network. You can also use static route or another overlay network tool like Weavenet or Flannel.1- Deploy the overlay network pods from the client machine.
+
+```
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+```
+2- Check that the pods are deployed properly.
+
+```
+kubectl get pods -n kube-system
+```
+3- Check that the nodes are in Ready state.
+
+```
+$ kubectl get nodes
+```
